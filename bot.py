@@ -443,21 +443,23 @@ async def play_cmd(interaction: discord.Interaction, query: str):
     await gm.enqueue(tracks)
     t = tracks[0]
     if was_idle:
-        await interaction.followup.send(
-            embed=discord.Embed(
-                title=f"▶️ {t.title}",
-                description=f"{t.artist} • {t.source_label}",
-                color=0x8B5CF6,
-            )
+        embed = discord.Embed(
+            title=f"▶️ {t.title}",
+            description=f"{t.artist} • {t.source_label} • {fmt_duration(t.duration)}",
+            color=0x8B5CF6,
         )
+        if t.artwork_url:
+            embed.set_thumbnail(url=t.artwork_url)
+        await interaction.followup.send(embed=embed)
     else:
-        await interaction.followup.send(
-            embed=discord.Embed(
-                title=f"Queued #{len(gm.queue) + 1}",
-                description=f"{t.title} — {t.artist}",
-                color=0x8B5CF6,
-            )
+        embed = discord.Embed(
+            title=f"Queued #{len(gm.queue) + 1}",
+            description=f"{t.title} — {t.artist}",
+            color=0x8B5CF6,
         )
+        if t.artwork_url:
+            embed.set_thumbnail(url=t.artwork_url)
+        await interaction.followup.send(embed=embed)
 
 
 @tree.command(name="search", description="Search addons and pick from dropdown")
@@ -604,13 +606,16 @@ async def nowplaying_cmd(interaction: discord.Interaction):
         )
         return
     t = gm.current
-    await interaction.response.send_message(
-        embed=discord.Embed(
-            title=t.title,
-            description=f"{t.artist} • {t.source_label}\n{fmt_duration(t.duration)}",
-            color=0x8B5CF6,
-        )
+    embed = discord.Embed(
+        title=t.title,
+        description=f"{t.artist} • {t.source_label}\n{fmt_duration(t.duration)} • 🔊 {gm.volume}%",
+        color=0x8B5CF6,
     )
+    if t.artwork_url:
+        embed.set_thumbnail(url=t.artwork_url)
+        embed.set_image(url=t.artwork_url)
+    embed.set_footer(text=f"Requested by {t.requested_by} • Loop: {gm.loop}")
+    await interaction.response.send_message(embed=embed)
 
 
 @tree.command(name="volume", description="Set volume 1-150")
