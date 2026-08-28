@@ -63,6 +63,9 @@ def validate_manifest(m: dict) -> dict:
 class AddonRegistry:
     def __init__(self):
         self.addons: dict[str, InstalledAddon] = {}
+        self._session: aiohttp.ClientSession | None = None
+        self._search_cache: dict[str, tuple[float, list]] = {}
+        self._stream_cache: dict[str, tuple[float, dict]] = {}
 
     async def load(self, bootstrap_urls: list[str]):
         # bootstrap
@@ -97,21 +100,32 @@ class AddonRegistry:
         }
         ADDONS_FILE.write_text(json.dumps(data, indent="\t") + "\n")
 
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+            )
+        return self._session
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
     async def refresh_all(self):
-        async with aiohttp.ClientSession() as session:
-            for base, addon in list(self.addons.items()):
-                try:
-                    m = await fetch_json(session, f"{base}/manifest.json", timeout=7)
-                    addon.manifest = validate_manifest(m)
-                    addon.last_error = None
-                except Exception as e:
-                    addon.last_error = str(e)
+        session = self._get_session()
+        for base, addon in list(self.addons.items()):
+            try:
+                m = await fetch_json(session, f"{base}/manifest.json", timeout=7)
+                addon.manifest = validate_manifest(m)
+                addon.last_error = None
+            except Exception as e:
+                addon.last_error = str(e)
 
     async def install(self, raw_url: str) -> InstalledAddon:
         base = normalize_base_url(raw_url)
-        async with aiohttp.ClientSession() as session:
-            m = await fetch_json(session, f"{base}/manifest.json", timeout=7)
-            manifest = validate_manifest(m)
+        session = self._get_session()
+        m = await fetch_json(session, f"{base}/manifest.json", timeout=7)
+        manifest = validate_manifest(m)
         addon = InstalledAddon(base_url=base, manifest=manifest, added_at=0)
         self.addons[base] = addon
         self._save()
@@ -154,6 +168,14 @@ class AddonRegistry:
     async def search_all(
         self, query: str, timeout: int = 6
     ) -> list[tuple[InstalledAddon, dict]]:
+        import time
+
+        # 30s cache for repeated searches
+        cache_key = query.strip().lower()
+        if cache_key in self._search_cache:
+            ts, cached = self._search_cache[cache_key]
+            if time.time() - ts < 30:
+                return cached
         searchable = [
             a
             for a in self.addons.values()
@@ -163,33 +185,37 @@ class AddonRegistry:
             raise ValueError("No search-capable addons. Use /addon-add first.")
         results = []
         seen = set()
-        async with aiohttp.ClientSession() as session:
-            tasks = [
-                fetch_json(
-                    session,
-                    f"{a.base_url}/search?q={urllib.parse.quote(query)}",
-                    timeout=timeout,
-                )
-                for a in searchable
-            ]
-            settled = await asyncio.gather(*tasks, return_exceptions=True)
-            for addon, res in zip(searchable, settled):
-                if isinstance(res, Exception):
+        session = self._get_session()
+        tasks = [
+            fetch_json(
+                session,
+                f"{a.base_url}/search?q={urllib.parse.quote(query)}",
+                timeout=timeout,
+            )
+            for a in searchable
+        ]
+        settled = await asyncio.gather(*tasks, return_exceptions=True)
+        for addon, res in zip(searchable, settled):
+            if isinstance(res, Exception):
+                continue
+            for t in res.get("tracks") or []:
+                if (
+                    not isinstance(t.get("id"), str)
+                    or not isinstance(t.get("title"), str)
+                    or not isinstance(t.get("artist"), str)
+                ):
                     continue
-                for t in res.get("tracks") or []:
-                    if (
-                        not isinstance(t.get("id"), str)
-                        or not isinstance(t.get("title"), str)
-                        or not isinstance(t.get("artist"), str)
-                    ):
-                        continue
-                    key = f"{t['title'].lower().strip()}|{t['artist'].lower().strip()}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    results.append((addon, t))
-                    if len(results) >= 50:
-                        break
+                key = f"{t['title'].lower().strip()}|{t['artist'].lower().strip()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append((addon, t))
+                if len(results) >= 50:
+                    break
+        self._search_cache[cache_key] = (time.time(), results)
+        # keep cache small
+        if len(self._search_cache) > 64:
+            self._search_cache.pop(next(iter(self._search_cache)))
         return results
 
     async def resolve_stream(
@@ -197,14 +223,25 @@ class AddonRegistry:
     ) -> dict:
         if preset_url and preset_url.startswith(("http://", "https://")):
             return {"url": preset_url, "format": "mp3"}
+        import time
+
+        cache_key = f"{addon.base_url}|{track_id}"
+        if cache_key in self._stream_cache:
+            ts, cached = self._stream_cache[cache_key]
+            if time.time() - ts < 300 and cached.get("url"):
+                return cached
         url = f"{addon.base_url}/stream/{urllib.parse.quote(track_id)}"
-        async with aiohttp.ClientSession() as session:
-            for _ in range(2):
-                try:
-                    data = await fetch_json(session, url, timeout=8)
-                    if not data.get("url") or not isinstance(data["url"], str):
-                        raise ValueError("No url in stream response")
-                    return data
-                except Exception as e:
-                    last = e
-            raise last
+        session = self._get_session()
+        last: Exception | None = None
+        for _ in range(2):
+            try:
+                data = await fetch_json(session, url, timeout=8)
+                if not data.get("url") or not isinstance(data["url"], str):
+                    raise ValueError("No url in stream response")
+                self._stream_cache[cache_key] = (time.time(), data)
+                if len(self._stream_cache) > 128:
+                    self._stream_cache.pop(next(iter(self._stream_cache)))
+                return data
+            except Exception as e:
+                last = e
+        raise last or ValueError("No url in stream response")
