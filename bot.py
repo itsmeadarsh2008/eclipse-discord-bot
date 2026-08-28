@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import pathlib
 import os
 import random
@@ -9,6 +10,19 @@ from discord import app_commands
 from discord.ext import commands
 
 from eclipse import AddonRegistry, InstalledAddon
+
+# Quiet down discord.py's very verbose INFO logs (voice handshake spam)
+logging.getLogger("discord").setLevel(logging.WARNING)
+logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
+logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+logging.getLogger("discord.ext.commands.bot").setLevel(
+    logging.ERROR
+)  # hide "message_content intent missing" warning
+
+
+def pretty(msg: str, emoji: str = "✨"):
+    print(f"{emoji} {msg}")
+
 
 # --- config ---
 import dotenv
@@ -39,6 +53,7 @@ intents = discord.Intents.default()
 intents.message_content = False
 intents.guilds = True
 intents.voice_states = True
+intents.members = False
 
 
 # --- track model ---
@@ -124,20 +139,20 @@ class GuildMusic:
         if not self.voice or not self.voice.is_connected():
             print("no voice to play")
             return
-        # Maximise Discord voice quality: match channel bitrate (64-384k), 48kHz stereo, audio-optimized Opus
+        # Maximise Discord voice quality: match channel bitrate (64-384k) — let discord.py set -ar/-ac to avoid dupes
         bitrate = (
             get_voice_bitrate_kbps(self.voice.channel)
             if self.voice and getattr(self.voice, "channel", None)
             else 128
         )
-        opus_opts = f"-vn -b:a {bitrate}k -ar 48000 -ac 2 -application audio"
+        opus_opts = f"-vn -b:a {bitrate}k"
         try:
             audio = discord.FFmpegOpusAudio(
                 url, before_options=FFMPEG_BEFORE, options=opus_opts
             )
         except Exception:
             audio = discord.FFmpegPCMAudio(
-                url, before_options=FFMPEG_BEFORE, options="-vn -ar 48000 -ac 2"
+                url, before_options=FFMPEG_BEFORE, options="-vn"
             )
             audio = discord.PCMVolumeTransformer(audio, volume=self.volume / 100)
             if hasattr(audio, "volume"):
@@ -196,9 +211,17 @@ class GuildMusic:
 # --- bot setup ---
 class EclipseBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.registry = AddonRegistry()
         self.hub: dict[int, GuildMusic] = {}
+
+    async def close(self):
+        # Gracefully close aiohttp session to avoid "Unclosed client session"
+        try:
+            await self.registry.close()
+        except:
+            pass
+        await super().close()
 
     def get_music(self, guild_id: int) -> GuildMusic:
         if guild_id not in self.hub:
@@ -256,24 +279,26 @@ async def resolve_query(
 # --- events ---
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user} — {len(client.guilds)} guild(s)")
+    pretty(f"Logged in as {client.user} — {len(client.guilds)} guild(s)", "🎵")
     await registry.load(ADDON_URLS)
-    print(
-        f"Loaded {len(registry.list())} addon(s): {', '.join([a.manifest.get('name', a.base_url) if a.manifest else a.base_url for a in registry.list()]) or 'none'}"
+    pretty(
+        f"Loaded {len(registry.list())} addon(s): {', '.join([a.manifest.get('name', a.base_url) if a.manifest else a.base_url for a in registry.list()]) or 'none'}",
+        "🔌",
     )
     try:
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             tree.copy_global_to(guild=guild)
             await tree.sync(guild=guild)
-            print(
-                f"Synced {len(tree.get_commands(guild=guild))} commands to guild {GUILD_ID}"
+            pretty(
+                f"Synced {len(tree.get_commands(guild=guild))} commands to guild {GUILD_ID}",
+                "🔗",
             )
         else:
             await tree.sync()
-            print(f"Synced {len(tree.get_commands())} global commands")
+            pretty(f"Synced {len(tree.get_commands())} global commands", "🔗")
     except Exception as e:
-        print(f"Sync failed: {e}")
+        pretty(f"Sync failed: {e}", "⚠️")
 
 
 class SearchView(discord.ui.View):
