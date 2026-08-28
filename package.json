@@ -1,0 +1,35 @@
+{
+	"name": "eclipse-discord-bot",
+	"version": "2.0.0-distube",
+	"description": "Discord music bot — DisTube (YouTube/Spotify/SoundCloud) + Eclipse Addons (JioSaavn/Qobuz) — Node + discord.js.",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"start": "node src/index.ts",
+		"start:bun": "bun run src/index.ts",
+		"dev": "node --watch src/index.ts",
+		"demo-addon": "bun run examples/demo-addon/server.ts",
+		"typecheck": "bunx tsc --noEmit",
+		"invite": "bun run src/invite.ts"
+	},
+	"engines": {
+		"node": ">=18.0.0"
+	},
+	"dependencies": {
+		"@discordjs/voice": "^0.18.0",
+		"@distube/ytdl-core": "^4.15.1",
+		"discord.js": "^14.14.1",
+		"distube": "^5.0.7",
+		"@distube/spotify": "^2.0.2",
+		"@distube/soundcloud": "^2.0.3",
+		"libsodium-wrappers": "^0.7.15",
+		"opusscript": "^0.1.1"
+	},
+	"optionalDependencies": {
+		"ffmpeg-static": "^5.2.0"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.1.0",
+		"typescript": "^5.6.0"
+	}
+}
