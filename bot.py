@@ -258,15 +258,129 @@ async def on_ready():
         print(f"Sync failed: {e}")
 
 
+class SearchView(discord.ui.View):
+    def __init__(self, results: list, author_id: int):
+        super().__init__(timeout=120)
+        self.results = results
+        self.author_id = author_id
+        options = []
+        for i, (addon, track) in enumerate(results[:8]):
+            label = track["title"][:100]
+            desc = f"{track['artist'][:80]} • {(addon.manifest or {}).get('name', addon.base_url)[:40]}"
+            options.append(
+                discord.SelectOption(
+                    label=label, description=desc[:100], value=str(i), emoji="🎵"
+                )
+            )
+        select = discord.ui.Select(
+            placeholder="Pick a track to play…",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "Only the searcher can pick.", ephemeral=True
+            )
+            return
+        idx = int(interaction.data["values"][0])  # type: ignore
+        addon, track = self.results[idx]
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message(
+                embed=discord.Embed(title="Join a voice channel first", color=0xED4245),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer()
+        gm = client.get_music(interaction.guild.id)  # type: ignore
+        gm_text = getattr(interaction, "channel", None)
+        if gm_text:
+            gm_text_id = getattr(gm_text, "id", None)
+            if gm_text_id:
+                gm.voice = gm.voice  # keep
+        try:
+            await gm.ensure_voice(interaction.user.voice.channel)  # type: ignore
+        except Exception as e:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="Voice failed", description=str(e), color=0xED4245
+                ),
+                ephemeral=True,
+            )
+            return
+        qt = QueuedTrack(
+            title=track["title"],
+            artist=track["artist"],
+            duration=track.get("duration"),
+            artwork_url=track.get("artworkURL"),
+            source_label=(addon.manifest or {}).get("name", addon.base_url),
+            addon_base=addon.base_url,
+            addon_id=track["id"],
+            preset_url=track.get("streamURL"),
+            requested_by=str(interaction.user),
+        )
+        was_idle = not gm.current and not gm.is_playing()
+        await gm.enqueue([qt])
+        embed = discord.Embed(
+            title=f"▶️ {qt.title}",
+            description=f"{qt.artist} • {qt.source_label}",
+            color=0x8B5CF6,
+        )
+        if qt.artwork_url:
+            embed.set_thumbnail(url=qt.artwork_url)
+        embed.set_footer(
+            text="Added via search picker" if not was_idle else "Now playing"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        self.stop()
+
+
 # --- slash commands ---
 @tree.command(name="help", description="How to use the bot")
 async def help_cmd(interaction: discord.Interaction):
-    desc = "**Playback**\n`/play <query|url>` — Eclipse addons or direct URL\n`/pause` `/resume` `/skip` `/stop` `/leave`\n\n**Queue**\n`/queue` `/nowplaying` `/volume` `/loop` `/shuffle`\n\n**Sources**\n`/addons` `/addon-add` `/addon-remove`"
-    await interaction.response.send_message(
-        embed=discord.Embed(
-            title="Eclipse Music Bot (discord.py)", description=desc, color=0x8B5CF6
+    embed = discord.Embed(
+        title="Eclipse Music — Help",
+        description="High-quality audio via Eclipse Addons (JioSaavn, Qobuz, Tidal…) — powered by FFmpeg Opus",
+        color=0x8B5CF6,
+    )
+    embed.set_thumbnail(url="https://cdn.discordapp.com/embed/avatars/0.png")
+    embed.add_field(
+        name="▶️ Playback",
+        value="`/play <query|url>` — search addons & play\n`/search <query>` — **pick from dropdown**\n`/pause` `/resume` `/skip [n]` `/stop` `/leave`",
+        inline=False,
+    )
+    embed.add_field(
+        name="📜 Queue",
+        value="`/queue` — upcoming tracks\n`/nowplaying` — current track\n`/volume <1-150>` `/loop <off|track|queue>` `/shuffle`",
+        inline=False,
+    )
+    embed.add_field(
+        name="🧩 Sources",
+        value="`/addons` — health & list\n`/addon-add <url>` — install addon\n`/addon-remove <name|url>` — remove",
+        inline=False,
+    )
+    embed.add_field(
+        name="💡 Tips",
+        value="• Join voice first • `/search` → dropdown → pick • `Direct URL` works too",
+        inline=False,
+    )
+    embed.set_footer(
+        text=f"Guild: {interaction.guild.name if interaction.guild else 'DM'} • /help to show this again"
+    )
+    view = discord.ui.View()
+    view.add_item(
+        discord.ui.Button(label="Docs", url="https://eclipsemusic.app/docs", emoji="📖")
+    )
+    view.add_item(
+        discord.ui.Button(
+            label="Addons", url="https://eclipsemusic.app/addons", emoji="🧩"
         )
     )
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @tree.command(name="play", description="Search Eclipse addons and play")
@@ -328,12 +442,16 @@ async def play_cmd(interaction: discord.Interaction, query: str):
         )
 
 
-@tree.command(name="search", description="Search addons and pick")
+@tree.command(name="search", description="Search addons and pick from dropdown")
 @app_commands.describe(query="What to search for")
 async def search_cmd(interaction: discord.Interaction, query: str):
     if not interaction.user.voice or not interaction.user.voice.channel:
         await interaction.response.send_message(
-            embed=discord.Embed(title="Join a voice channel first", color=0xED4245),
+            embed=discord.Embed(
+                title="Join a voice channel first",
+                description="Join voice before searching — so picking can play instantly.",
+                color=0xED4245,
+            ),
             ephemeral=True,
         )
         return
@@ -351,22 +469,27 @@ async def search_cmd(interaction: discord.Interaction, query: str):
     top = results[:8]
     if not top:
         await interaction.followup.send(
-            embed=discord.Embed(title="No results", color=0xED4245), ephemeral=True
+            embed=discord.Embed(
+                title="No results",
+                description=f"No matches for **{query}** — try other keywords or `/addon-add`.",
+                color=0xED4245,
+            ),
+            ephemeral=True,
         )
         return
-    # for brevity, just play the first result and list others
-    lines = [
-        f"**{i + 1}. {t['title']}** — {t['artist']} ({a.manifest.get('name', a.base_url) if a.manifest else a.base_url})"
-        for i, (a, t) in enumerate(top)
-    ]
-    await interaction.followup.send(
-        embed=discord.Embed(
-            title=f"Found {len(results)}",
-            description="\n".join(lines) + "\n\nUse /play with the exact title to play",
-            color=0x8B5CF6,
-        ),
-        ephemeral=True,
+    embed = discord.Embed(
+        title=f"🔍 {len(results)} result(s) for “{query}”",
+        description="Pick a track below — dropdown expires in 2 minutes.",
+        color=0x8B5CF6,
     )
+    for i, (a, t) in enumerate(top):
+        embed.add_field(
+            name=f"{i + 1}. {t['title'][:80]}",
+            value=f"{t['artist'][:60]} • {fmt_duration(t.get('duration'))} • {(a.manifest or {}).get('name', a.base_url)[:30]}",
+            inline=False,
+        )
+    view = SearchView(top, interaction.user.id)
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 @tree.command(name="pause", description="Pause")
