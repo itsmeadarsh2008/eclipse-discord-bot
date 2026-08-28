@@ -230,18 +230,25 @@ class AddonRegistry:
             ts, cached = self._stream_cache[cache_key]
             if time.time() - ts < 300 and cached.get("url"):
                 return cached
-        url = f"{addon.base_url}/stream/{urllib.parse.quote(track_id)}"
+        # Try highest quality first (320k / lossless), fallback to default if addon ignores it
+        urls_to_try = [
+            f"{addon.base_url}/stream/{urllib.parse.quote(track_id)}?quality=320",
+            f"{addon.base_url}/stream/{urllib.parse.quote(track_id)}",
+        ]
         session = self._get_session()
         last: Exception | None = None
-        for _ in range(2):
-            try:
-                data = await fetch_json(session, url, timeout=8)
-                if not data.get("url") or not isinstance(data["url"], str):
-                    raise ValueError("No url in stream response")
-                self._stream_cache[cache_key] = (time.time(), data)
-                if len(self._stream_cache) > 128:
-                    self._stream_cache.pop(next(iter(self._stream_cache)))
-                return data
-            except Exception as e:
-                last = e
+        for url in urls_to_try:
+            for _ in range(2):
+                try:
+                    data = await fetch_json(session, url, timeout=8)
+                    if not data.get("url") or not isinstance(data["url"], str):
+                        raise ValueError("No url in stream response")
+                    self._stream_cache[cache_key] = (time.time(), data)
+                    if len(self._stream_cache) > 128:
+                        self._stream_cache.pop(next(iter(self._stream_cache)))
+                    return data
+                except Exception as e:
+                    last = e
+                    continue
+            break
         raise last or ValueError("No url in stream response")

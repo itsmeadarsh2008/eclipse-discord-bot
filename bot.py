@@ -23,6 +23,18 @@ ADDON_URLS = [
 DEFAULT_VOLUME = max(1, min(150, int(os.getenv("DEFAULT_VOLUME") or 100)))
 FFMPEG_BEFORE = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"'
 
+
+def get_voice_bitrate_kbps(channel) -> int:
+    if channel is None:
+        return 128
+    try:
+        bps = getattr(channel, "bitrate", 128000) or 128000
+        kbps = int(bps // 1000)
+        return max(64, min(384, kbps))
+    except:
+        return 128
+
+
 intents = discord.Intents.default()
 intents.message_content = False
 intents.guilds = True
@@ -112,14 +124,20 @@ class GuildMusic:
         if not self.voice or not self.voice.is_connected():
             print("no voice to play")
             return
-        # FFmpegOpusAudio handles opus encoding via ffmpeg, no local opus needed
+        # Maximise Discord voice quality: match channel bitrate (64-384k), 48kHz stereo, audio-optimized Opus
+        bitrate = (
+            get_voice_bitrate_kbps(self.voice.channel)
+            if self.voice and getattr(self.voice, "channel", None)
+            else 128
+        )
+        opus_opts = f"-vn -b:a {bitrate}k -ar 48000 -ac 2 -application audio"
         try:
             audio = discord.FFmpegOpusAudio(
-                url, before_options=FFMPEG_BEFORE, options="-vn"
+                url, before_options=FFMPEG_BEFORE, options=opus_opts
             )
         except Exception:
             audio = discord.FFmpegPCMAudio(
-                url, before_options=FFMPEG_BEFORE, options="-vn"
+                url, before_options=FFMPEG_BEFORE, options="-vn -ar 48000 -ac 2"
             )
             audio = discord.PCMVolumeTransformer(audio, volume=self.volume / 100)
             if hasattr(audio, "volume"):
